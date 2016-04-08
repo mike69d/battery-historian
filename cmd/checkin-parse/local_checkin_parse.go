@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All Rights Reserved.
+// Copyright 2016 Google Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// local_checkin_parse parses checkin format of batterystats into a batterystats proto.
 package main
 
 import (
@@ -19,11 +20,15 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/golang/protobuf/proto"
-
-	bspb "github.com/google/battery-historian/pb/batterystats_proto"
+	"github.com/google/battery-historian/bugreportutils"
+	"github.com/google/battery-historian/checkinparse"
+	"github.com/google/battery-historian/checkinutil"
+	"github.com/google/battery-historian/packageutils"
+	sessionpb "github.com/google/battery-historian/pb/session_proto"
 )
 
 var (
@@ -45,15 +50,23 @@ func main() {
 		log.Fatalf("Cannot open the file %s: %v", *inputFile, err)
 	}
 
-	br := string(c)
-	s := &bspb.Checkin{Checkin: proto.String(br)}
-	pkgs, errs := parse.ExtractAppsFromBugReport(br)
+	br, fname, err := bugreportutils.ExtractBugReport(*inputFile, c)
+	if err != nil {
+		log.Fatalf("Error getting file contents: %v", err)
+	}
+	fmt.Printf("Parsing %s\n", fname)
+	bs := bugreportutils.ExtractBatterystatsCheckin(br)
+	if strings.Contains(bs, "Exception occurred while dumping") {
+		log.Fatalf("Exception found in battery dump.")
+	}
+	s := &sessionpb.Checkin{Checkin: proto.String(bs)}
+	pkgs, errs := packageutils.ExtractAppsFromBugReport(br)
 	if len(errs) > 0 {
 		log.Fatalf("Errors encountered when getting package list: %v", errs)
 	}
 
-	var ctr parse.IntCounter
-	stats, warns, errs := parse.ParseBatteryStats(&ctr, parse.CreateCheckinReport(s), pkgs)
+	var ctr checkinutil.IntCounter
+	stats, warns, errs := checkinparse.ParseBatteryStats(&ctr, checkinparse.CreateCheckinReport(s), pkgs)
 	if len(warns) > 0 {
 		log.Printf("Encountered unexpected warnings: %v\n", warns)
 	}
@@ -63,12 +76,12 @@ func main() {
 	fmt.Println("\n################\n")
 	fmt.Println("Partial Wakelocks")
 	fmt.Println("################\n")
-	var pwl []*parse.WakelockInfo
+	var pwl []*checkinparse.WakelockInfo
 	for _, app := range stats.App {
 		for _, pw := range app.Wakelock {
 			if pw.GetPartialTimeMsec() > 0 {
 				pwl = append(pwl,
-					&parse.WakelockInfo{
+					&checkinparse.WakelockInfo{
 						Name:     fmt.Sprintf("%s : %s", app.GetName(), pw.GetName()),
 						UID:      app.GetUid(),
 						Duration: time.Duration(pw.GetPartialTimeMsec()) * time.Millisecond,
@@ -77,7 +90,7 @@ func main() {
 		}
 
 	}
-	parse.SortByTime(pwl)
+	checkinparse.SortByTime(pwl)
 	for _, pw := range pwl[:min(5, len(pwl))] {
 		fmt.Printf("%s (uid=%d) %s\n", pw.Duration, pw.UID, pw.Name)
 	}
@@ -85,16 +98,16 @@ func main() {
 	fmt.Println("\n################")
 	fmt.Println("Kernel Wakelocks")
 	fmt.Println("################\n")
-	var kwl []*parse.WakelockInfo
+	var kwl []*checkinparse.WakelockInfo
 	for _, kw := range stats.System.KernelWakelock {
 		if kw.GetName() != "PowerManagerService.WakeLocks" && kw.GetTimeMsec() > 0 {
-			kwl = append(kwl, &parse.WakelockInfo{
+			kwl = append(kwl, &checkinparse.WakelockInfo{
 				Name:     kw.GetName(),
 				Duration: time.Duration(kw.GetTimeMsec()) * time.Millisecond,
 			})
 		}
 	}
-	parse.SortByTime(kwl)
+	checkinparse.SortByTime(kwl)
 	for _, kw := range kwl[:min(5, len(kwl))] {
 		fmt.Printf("%s %s\n", kw.Duration, kw.Name)
 	}
